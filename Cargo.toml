@@ -11,9 +11,9 @@ description = "A HTTP interface module for Valkey"
 
 [dependencies]
 valkey-module = "0.1.1"
-httparse = "1.9.4"
 serde = "1.0.207"
 serde_json = "1.0.124"
+rouille = "3.6.2"
 
 [lib]
 crate-type = ["cdylib"]
