@@ -29,7 +29,6 @@ fn initialize(_ctx: &Context, _args: &[ValkeyString]) -> Status {
                 handle_connection_lib(stream);
             });
         }
-        Status::Ok
     });
     Status::Ok
 }
