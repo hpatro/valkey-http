@@ -1,3 +1,4 @@
+use rouille::Request;
 use serde::{Serialize, Deserialize};
 use std::ptr::NonNull;
 use std::thread;
@@ -6,12 +7,12 @@ use rouille::router;
 use rouille::Response;
 use valkey_module::{
     logging::{log_debug, log_notice},
-    raw, valkey_module, Context, KeyMode, Status, ThreadSafeContext, ValkeyString,
+    raw, valkey_module, Context, KeyMode, Status, ThreadSafeContext, ValkeyString
 };
 
 pub const MODULE_NAME: &str = "valkeyhttp";
 
-fn initialize(_ctx: &Context, _args: &[ValkeyString]) -> Status {
+fn initialize(ctx: &Context, _args: &[ValkeyString]) -> Status {
     thread::spawn(move || {
         start_http_handler();
     });
@@ -21,20 +22,6 @@ fn initialize(_ctx: &Context, _args: &[ValkeyString]) -> Status {
 fn deinitialize(_ctx: &Context) -> Status {
     // Clean up resources if needed
     Status::Ok
-}
-
-fn start_http_handler() {
-    log_notice("Listening for HTTP request on 8080");
-    rouille::start_server("0.0.0.0:8080", move |request| {
-        router!(request,
-            (POST) (/process) => {
-                let command: CommandRequest = try_or_400!(rouille::input::json_input(request));
-                log_debug(format!("Command to process: {}", command.args));
-                process_command(command.args)
-            },
-            _ => Response::empty_404()
-        )
-    });
 }
 
 #[derive(Deserialize)]
@@ -48,6 +35,41 @@ struct CommandRequest {
 struct CommandResponse<'a> {
     code: &'a str,
     data: Option<String>
+}
+
+fn start_http_handler() {
+    log_notice("Listening for HTTP request on 8080");
+    rouille::start_server("0.0.0.0:8080", move |request| {
+        match verify_auth(request) {
+            Ok(_) => (),
+            Err(_) => return Response::basic_http_auth_login_required("acl"),
+        }
+        router!(request,
+            (POST) (/process) => {
+                let command: CommandRequest = try_or_400!(rouille::input::json_input(request));
+                log_debug(format!("Command to process: {}", command.args));
+                process_command(command.args)
+            },
+            _ => Response::empty_404()
+        )
+    });
+}
+
+fn verify_auth(request: &Request) -> Result<(), &'static str> {
+    let auth = match rouille::input::basic_http_auth(request) {
+        Some(a) => a,
+        None => return Err("Credentials not found"),
+    };
+/*
+    let thread_ctx = ThreadSafeContext::new();
+    let ctx = thread_ctx.lock();
+    let call_args = vec![auth.login.as_str(), auth.password.as_str()];
+    match ctx.call("AUTH", &vec!["default", "password"]) {
+        Ok(_) => return Ok(()),
+        Err(_) => return Err("Incorrect credentials"),
+    }
+ */
+    Ok(())
 }
 
 fn process_command(arguments: String) -> Response {
