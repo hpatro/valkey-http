@@ -1,7 +1,6 @@
 use rouille::input::HttpAuthCredentials;
 use rouille::Request;
 use serde::{Serialize, Deserialize};
-use valkey_module::DetachedFromClient;
 use std::ptr::NonNull;
 use std::thread;
 use rouille::try_or_400;
@@ -50,7 +49,13 @@ fn start_http_handler() {
             (POST) (/process) => {
                 let command: CommandRequest = try_or_400!(rouille::input::json_input(request));
                 log_debug(format!("Command to process: {}", command.args));
-                process_command(cred.login ,command.args)
+                process_command(&cred.login ,command.args)
+            },
+            (GET) (/item/{key: String}) => {
+                process_command(&cred.login, format!("GET {}", key))
+            },
+            (DELETE) (/item/{key: String}) => {
+                process_command(&cred.login, format!("DEL {}", key))
             },
             _ => Response::empty_404()
         )
@@ -70,7 +75,7 @@ fn verify_auth(request: &Request) -> Result<HttpAuthCredentials, &'static str> {
     };
 }
 
-fn process_command(user_name: String, arguments: String) -> Response {
+fn process_command(_user_name: &String, arguments: String) -> Response {
     let thread_ctx = ThreadSafeContext::new();
     let ctx = thread_ctx.lock();
 /*
@@ -111,6 +116,14 @@ fn process_command(user_name: String, arguments: String) -> Response {
                     Response::json(&CommandResponse {code: "ERR", data: None})
                 }
             }
+        },
+        "del" => {
+            let key = ctx.open_key_writable(&key);
+            if key.is_empty() {
+                return Response::json(&CommandResponse {code: "OK", data: Some("0".to_string())});
+            }
+            let _ = key.delete();
+            Response::json(&CommandResponse {code: "OK", data: Some("1".to_string())})
         },
         _ => Response::empty_404(),
     }
