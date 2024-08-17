@@ -1,0 +1,1 @@
+- [ ] Create Global Context to avoid repetitive create/drop.
