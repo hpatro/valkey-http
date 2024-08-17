@@ -1,5 +1,7 @@
+use rouille::input::HttpAuthCredentials;
 use rouille::Request;
 use serde::{Serialize, Deserialize};
+use valkey_module::DetachedFromClient;
 use std::ptr::NonNull;
 use std::thread;
 use rouille::try_or_400;
@@ -40,22 +42,22 @@ struct CommandResponse<'a> {
 fn start_http_handler() {
     log_notice("Listening for HTTP request on 8080");
     rouille::start_server("0.0.0.0:8080", move |request| {
-        match verify_auth(request) {
-            Ok(_) => (),
+        let cred = match verify_auth(request) {
+            Ok(cred) => cred,
             Err(_) => return Response::basic_http_auth_login_required("acl"),
-        }
+        };
         router!(request,
             (POST) (/process) => {
                 let command: CommandRequest = try_or_400!(rouille::input::json_input(request));
                 log_debug(format!("Command to process: {}", command.args));
-                process_command(command.args)
+                process_command(cred.login ,command.args)
             },
             _ => Response::empty_404()
         )
     });
 }
 
-fn verify_auth(request: &Request) -> Result<(), &'static str> {
+fn verify_auth(request: &Request) -> Result<HttpAuthCredentials, &'static str> {
     let auth = match rouille::input::basic_http_auth(request) {
         Some(a) => a,
         None => return Err("Credentials not found"),
@@ -63,14 +65,23 @@ fn verify_auth(request: &Request) -> Result<(), &'static str> {
     let thread_ctx = ThreadSafeContext::new();
     let ctx = thread_ctx.lock();
     match ctx.call("AUTH", &[&auth.login, &auth.password]) {
-        Ok(_) => return Ok(()),
+        Ok(_) => return Ok(auth),
         Err(_) => return Err("Incorrect credentials"),
     };
 }
 
-fn process_command(arguments: String) -> Response {
+fn process_command(user_name: String, arguments: String) -> Response {
     let thread_ctx = ThreadSafeContext::new();
     let ctx = thread_ctx.lock();
+/*
+    // TODO Add user to the context for ACL validation on the call.
+    /* Unable to add user to the context as the thread context doesn't have client attached to it. */
+    let user_name = ValkeyString::create(None, user_name);
+    let ctx_user_scope = match ctx.authenticate_user(&user_name) {
+        Ok(ctx) => ctx,
+        Err(msg) => return Response::basic_http_auth_login_required(msg.to_string().as_str()),
+    };
+ */
     let mut args = arguments.as_str().split(" ");
     let cmd_name = args.next().unwrap();
     let key = args.next().unwrap();
@@ -84,7 +95,7 @@ fn process_command(arguments: String) -> Response {
                 raw::Status::Ok => Response::json(&CommandResponse {code: "OK", data: None}),
                 raw::Status::Err => Response::json(&CommandResponse {code: "ERR", data: None}),
             }
-        }
+        },
         "get" => {
             let key = ctx.open_key(&key);
             match key.read() {
