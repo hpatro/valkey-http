@@ -12,7 +12,7 @@ use valkey_module::{
 
 pub const MODULE_NAME: &str = "valkeyhttp";
 
-fn initialize(ctx: &Context, _args: &[ValkeyString]) -> Status {
+fn initialize(_ctx: &Context, _args: &[ValkeyString]) -> Status {
     thread::spawn(move || {
         start_http_handler();
     });
@@ -60,16 +60,12 @@ fn verify_auth(request: &Request) -> Result<(), &'static str> {
         Some(a) => a,
         None => return Err("Credentials not found"),
     };
-/*
     let thread_ctx = ThreadSafeContext::new();
     let ctx = thread_ctx.lock();
-    let call_args = vec![auth.login.as_str(), auth.password.as_str()];
-    match ctx.call("AUTH", &vec!["default", "password"]) {
+    match ctx.call("AUTH", &[&auth.login, &auth.password]) {
         Ok(_) => return Ok(()),
         Err(_) => return Err("Incorrect credentials"),
-    }
- */
-    Ok(())
+    };
 }
 
 fn process_command(arguments: String) -> Response {
