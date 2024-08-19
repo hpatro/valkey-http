@@ -2,3 +2,4 @@
 - [ ] Delete API to remove a key.
 - [ ] Upgrade request to Websocket to implement MONITOR command
 - [ ] Add user to context to apply ACL rule before execution.
+- [ ] Implement command filter in valkeymodule-rs to support MONITOR api.
