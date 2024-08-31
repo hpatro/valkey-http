@@ -41,6 +41,12 @@ struct CommandResponse<'a> {
     data: Option<String>
 }
 
+impl<'a> Into<String> for CommandResponse<'a> {
+    fn into(self) -> String {
+        serde_json::to_string(&self).unwrap()
+    }
+}
+
 fn start_http_handler() {
     log_notice("Listening for HTTP request on 8080");
     rouille::start_server("0.0.0.0:8080", move |request| {
@@ -52,16 +58,16 @@ fn start_http_handler() {
             (POST) (/process) => {
                 let command: CommandRequest = try_or_400!(rouille::input::json_input(request));
                 log_debug(format!("Command to process: {}", command.args));
-                process_command(&cred.login ,command.args)
+                Response::json(&process_command(cred.login.clone() ,command.args))
             },
             (GET) (/item/{key: String}) => {
-                process_command(&cred.login, format!("GET {}", key))
+                Response::json(&process_command(cred.login.clone(), format!("GET {}", key)))
             },
             (DELETE) (/item/{key: String}) => {
-                process_command(&cred.login, format!("DEL {}", key))
+                Response::json(&process_command(cred.login.clone(), format!("DEL {}", key)))
             },
             (GET) (/ping) => {
-                Response::text("pong")
+                Response::json(&CommandResponse {code: "PONG", data: None})
             },
             (GET) (/health) => {
                 // This is the websockets route.
@@ -93,12 +99,35 @@ fn start_http_handler() {
 }
 
 fn websocket_handling_thread(mut websocket: websocket::Websocket) {
-    // We wait for a new message to come from the websocket.
+    loop {
+        // We wait for a new message to come from the websocket.
+        let msg = match websocket.next() {
+            Some(msg) => {
+                match msg {
+                    websocket::Message::Text(arguments) => {
+                        if arguments.eq("PING") {
+                            websocket.send_text("PONG");
+                        } else {
+                            let response = process_command("default".to_string(), arguments);
+                            let response: String = response.into();
+                            websocket.send_text(&response);
+                        }
+                    },
+                    websocket::Message::Binary(_) => return,
+                }
+            }
+            None => return,
+        };
+    }
+}
+
+fn websocket_health_thread(mut websocket: websocket::Websocket) {
     loop {
         websocket.send_text("PING").unwrap();
         sleep(Duration::from_secs(1));
     }
 }
+
 
 fn verify_auth(request: &Request) -> Result<HttpAuthCredentials, &'static str> {
     let auth = match rouille::input::basic_http_auth(request) {
@@ -113,7 +142,7 @@ fn verify_auth(request: &Request) -> Result<HttpAuthCredentials, &'static str> {
     };
 }
 
-fn process_command(_user_name: &String, arguments: String) -> Response {
+fn process_command(_user_name: String, arguments: String) -> CommandResponse<'static> {
     let thread_ctx = ThreadSafeContext::new();
     let ctx = thread_ctx.lock();
 /*
@@ -135,8 +164,8 @@ fn process_command(_user_name: &String, arguments: String) -> Response {
             let val = args.next().unwrap();
             let val = ValkeyString::create(NonNull::new(ctx.get_raw()), val);
             match raw::string_set(key_inner, val.inner) {
-                raw::Status::Ok => Response::json(&CommandResponse {code: "OK", data: None}),
-                raw::Status::Err => Response::json(&CommandResponse {code: "ERR", data: None}),
+                raw::Status::Ok => CommandResponse {code: "OK", data: None},
+                raw::Status::Err => CommandResponse {code: "ERR", data: None},
             }
         },
         "get" => {
@@ -144,26 +173,26 @@ fn process_command(_user_name: &String, arguments: String) -> Response {
             match key.read() {
                 Ok(val) => {
                     if val.is_none() {
-                        Response::json(&CommandResponse {code: "OK", data: None})
+                        CommandResponse {code: "OK", data: None}
                     } else {
                         let val_data = String::from_utf8_lossy(val.unwrap()).into_owned();
-                        Response::json(&CommandResponse {code: "OK", data: Some(val_data)})
+                        CommandResponse {code: "OK", data: Some(val_data)}
                     }
                 }
                 Err(_) => {
-                    Response::json(&CommandResponse {code: "ERR", data: None})
+                    CommandResponse {code: "ERR", data: None}
                 }
             }
         },
         "del" => {
             let key = ctx.open_key_writable(&key);
             if key.is_empty() {
-                return Response::json(&CommandResponse {code: "OK", data: Some("0".to_string())});
+                return CommandResponse {code: "OK", data: Some("0".to_string())};
             }
             let _ = key.delete();
-            Response::json(&CommandResponse {code: "OK", data: Some("1".to_string())})
+            CommandResponse {code: "OK", data: Some("1".to_string())}
         },
-        _ => Response::empty_404(),
+        _ => CommandResponse {code: "ERR", data: None },
     }
 
 }
