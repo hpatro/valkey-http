@@ -34,14 +34,24 @@ struct CommandRequest {
     args: String,
 }
 
+
 #[derive(Deserialize)]
 #[derive(Serialize)]
-struct CommandResponse<'a> {
-    code: &'a str,
+enum ValkeyCommandCode {
+    Ok,
+    Err,
+    NotFound,
+    NotAllowed,
+}
+
+#[derive(Deserialize)]
+#[derive(Serialize)]
+struct CommandResponse {
+    code: ValkeyCommandCode,
     data: Option<String>
 }
 
-impl<'a> Into<String> for CommandResponse<'a> {
+impl Into<String> for CommandResponse {
     fn into(self) -> String {
         serde_json::to_string(&self).unwrap()
     }
@@ -67,28 +77,20 @@ fn start_http_handler() {
                 Response::json(&process_command(cred.login.clone(), format!("DEL {}", key)))
             },
             (GET) (/ping) => {
-                Response::json(&CommandResponse {code: "PONG", data: None})
+                Response::json(&CommandResponse {code: ValkeyCommandCode::Ok, data: Some("PONG".to_string())})
             },
             (GET) (/health) => {
-                // This is the websockets route.
-
-                // In order to start using websockets we call `websocket::start`.
-                // The function returns an error if the client didn't request websockets, in which
-                // case we return an error 400 to the client thanks to the `try_or_400!` macro.
-                //
-                // The function returns a response to send back as part of the `start_server`
-                // function, and a `websocket` variable of type `Receiver<Websocket>`.
-                // Once the response has been sent back to the client, the `Receiver` will be
-                // filled by rouille with a `Websocket` object representing the websocket.
-                println!("{:?}", request.headers());
                 let (response, websocket) = try_or_400!(websocket::start(request, Some("echo")));
-
-                // Because of the nature of I/O in Rust, we need to spawn a separate thread for
-                // each websocket.
                 thread::spawn(move || {
-                    // This line will block until the `response` above has been returned.
                     let ws = websocket.recv().unwrap();
-                    // We use a separate function for better readability.
+                    websocket_health_thread(ws);
+                });
+                response
+            },
+            (GET) (/process) => {
+                let (response, websocket) = try_or_400!(websocket::start(request, Some("echo")));
+                thread::spawn(move || {
+                    let ws = websocket.recv().unwrap();
                     websocket_handling_thread(ws);
                 });
                 response
@@ -101,22 +103,25 @@ fn start_http_handler() {
 fn websocket_handling_thread(mut websocket: websocket::Websocket) {
     loop {
         // We wait for a new message to come from the websocket.
-        let msg = match websocket.next() {
+        match websocket.next() {
             Some(msg) => {
                 match msg {
                     websocket::Message::Text(arguments) => {
-                        if arguments.eq("PING") {
-                            websocket.send_text("PONG");
+                        if arguments.to_lowercase().eq("ping") {
+                            let _ = websocket.send_text("PONG");
                         } else {
                             let response = process_command("default".to_string(), arguments);
                             let response: String = response.into();
-                            websocket.send_text(&response);
+                            let _ = websocket.send_text(&response);
                         }
                     },
                     websocket::Message::Binary(_) => return,
                 }
             }
-            None => return,
+            None => {
+                log_debug("Websocket connection closed!");
+                return;
+            }
         };
     }
 }
@@ -142,7 +147,7 @@ fn verify_auth(request: &Request) -> Result<HttpAuthCredentials, &'static str> {
     };
 }
 
-fn process_command(_user_name: String, arguments: String) -> CommandResponse<'static> {
+fn process_command(_user_name: String, arguments: String) -> CommandResponse {
     let thread_ctx = ThreadSafeContext::new();
     let ctx = thread_ctx.lock();
 /*
@@ -164,8 +169,8 @@ fn process_command(_user_name: String, arguments: String) -> CommandResponse<'st
             let val = args.next().unwrap();
             let val = ValkeyString::create(NonNull::new(ctx.get_raw()), val);
             match raw::string_set(key_inner, val.inner) {
-                raw::Status::Ok => CommandResponse {code: "OK", data: None},
-                raw::Status::Err => CommandResponse {code: "ERR", data: None},
+                raw::Status::Ok => CommandResponse {code: ValkeyCommandCode::Ok, data: None},
+                raw::Status::Err => CommandResponse {code: ValkeyCommandCode::Err, data: None},
             }
         },
         "get" => {
@@ -173,28 +178,27 @@ fn process_command(_user_name: String, arguments: String) -> CommandResponse<'st
             match key.read() {
                 Ok(val) => {
                     if val.is_none() {
-                        CommandResponse {code: "OK", data: None}
+                        CommandResponse {code: ValkeyCommandCode::Ok, data: None}
                     } else {
                         let val_data = String::from_utf8_lossy(val.unwrap()).into_owned();
-                        CommandResponse {code: "OK", data: Some(val_data)}
+                        CommandResponse {code: ValkeyCommandCode::Ok, data: Some(val_data)}
                     }
                 }
                 Err(_) => {
-                    CommandResponse {code: "ERR", data: None}
+                    CommandResponse {code: ValkeyCommandCode::Err, data: None}
                 }
             }
         },
         "del" => {
             let key = ctx.open_key_writable(&key);
             if key.is_empty() {
-                return CommandResponse {code: "OK", data: Some("0".to_string())};
+                return CommandResponse {code: ValkeyCommandCode::Ok, data: Some("0".to_string())};
             }
             let _ = key.delete();
-            CommandResponse {code: "OK", data: Some("1".to_string())}
+            CommandResponse {code: ValkeyCommandCode::Ok, data: Some("1".to_string())}
         },
-        _ => CommandResponse {code: "ERR", data: None },
+        _ => CommandResponse {code: ValkeyCommandCode::Err, data: None },
     }
-
 }
 
 valkey_module! {
