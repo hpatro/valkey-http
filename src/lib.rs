@@ -1,8 +1,9 @@
 use rouille::input::HttpAuthCredentials;
 use rouille::websocket;
 use rouille::Request;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::ptr::NonNull;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
@@ -10,13 +11,24 @@ use rouille::try_or_400;
 use rouille::router;
 use rouille::Response;
 use valkey_module::{
+    CommandFilter, CommandFilterCtx,
     logging::{log_debug, log_notice},
-    raw, valkey_module, Context, KeyMode, Status, ThreadSafeContext, ValkeyString
+    raw, valkey_module, Context, KeyMode, Status, ThreadSafeContext, ValkeyString,
 };
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 
 pub const MODULE_NAME: &str = "valkeyhttp";
 
+static MONITOR_CHANNELS: Lazy<Mutex<Vec<Sender<String>>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+static mut CMD_FILTER: Option<CommandFilter> = None;
+
 fn initialize(_ctx: &Context, _args: &[ValkeyString]) -> Status {
+    unsafe {
+        let filter = _ctx.register_command_filter(command_filter_callback, 0);
+        CMD_FILTER = Some(filter);
+    }
     thread::spawn(move || {
         start_http_handler();
     });
@@ -24,6 +36,12 @@ fn initialize(_ctx: &Context, _args: &[ValkeyString]) -> Status {
 }
 
 fn deinitialize(_ctx: &Context) -> Status {
+    unsafe {
+        if let Some(filter) = CMD_FILTER {
+            _ctx.unregister_command_filter(&filter);
+            CMD_FILTER = None;
+        }
+    }
     // Clean up resources if needed
     Status::Ok
 }
@@ -55,6 +73,19 @@ impl Into<String> for CommandResponse {
     fn into(self) -> String {
         serde_json::to_string(&self).unwrap()
     }
+}
+
+extern "C" fn command_filter_callback(filter: *mut valkey_module::RedisModuleCommandFilterCtx) {
+    let ctx = CommandFilterCtx::new(filter);
+    let cmd = match ctx.cmd_get_try_as_str() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut parts = vec![cmd];
+    parts.extend(ctx.get_all_args_wo_cmd());
+    let message = parts.join(" ");
+    let mut senders = MONITOR_CHANNELS.lock().unwrap();
+    senders.retain(|s| s.send(message.clone()).is_ok());
 }
 
 fn start_http_handler() {
@@ -95,6 +126,16 @@ fn start_http_handler() {
                 });
                 response
             },
+            (GET) (/monitor) => {
+                let (response, websocket) = try_or_400!(websocket::start(request, Some("echo")));
+                let (tx, rx) = mpsc::channel();
+                MONITOR_CHANNELS.lock().unwrap().push(tx);
+                thread::spawn(move || {
+                    let ws = websocket.recv().unwrap();
+                    websocket_monitor_thread(ws, rx);
+                });
+                response
+            },
             _ => Response::empty_404()
         )
     });
@@ -131,6 +172,15 @@ fn websocket_health_thread(mut websocket: websocket::Websocket) {
         websocket.send_text("PING").unwrap();
         sleep(Duration::from_secs(1));
     }
+}
+
+fn websocket_monitor_thread(mut websocket: websocket::Websocket, rx: mpsc::Receiver<String>) {
+    for msg in rx {
+        if websocket.send_text(&msg).is_err() {
+            break;
+        }
+    }
+    log_debug("Monitor websocket connection closed!");
 }
 
 
